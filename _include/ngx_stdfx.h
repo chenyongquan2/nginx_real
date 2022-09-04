@@ -10,9 +10,6 @@
 #include <time.h>      //localtime_r
 #include <fcntl.h>     //open
 
-
-
-
 //linux专属
 #include <unistd.h>    //STDERR_FILENO等 env usleep
 #include <errno.h>
@@ -31,10 +28,13 @@
 #include <vector>
 #include <list>
 #include <map>          //multimap
+#include <assert.h>
 
 //线程相关头文件
 #include <pthread.h> 
 #include <semaphore.h>  //信号量 
 #include <atomic>       //c++11里的原子操作
+
+#define ASSERT(COND) assert(COND)
 
 #endif //__NGX_STDFX_H__

@@ -126,7 +126,7 @@ void CLogicSocket::ExecCmd(char *pMsgBuf)
     return;	
 }
 
-//心跳包检测时间到，该去检测心跳包是否超时的事宜，本函数是子类函数，实现具体的判断动作
+//心跳包检测时间到，该去检测心跳包是否超时的事宜
 void CLogicSocket::DoPingTimeOutChecking(NgxExtraMsgHeaderInfo* tmpmsg,time_t cur_time)
 {
     CMemory *p_memory = CMemory::GetInstance();
@@ -135,12 +135,15 @@ void CLogicSocket::DoPingTimeOutChecking(NgxExtraMsgHeaderInfo* tmpmsg,time_t cu
     {
         NgxConnectionInfo* p_Conn = tmpmsg->pConn;
 
-        if(/*m_ifkickTimeCount == 1 && */m_ifTimeOutKick == 1)  //能调用到本函数第一个条件肯定成立，所以第一个条件加不加无所谓，主要是第二个条件
+        //一定是开启了踢人时钟 才能有机会走进来这个函数里面的。所以m_bKickConnWhenTimeOut肯定为1
+		
+        //m_ifTimeOutKick表示是否开启了超时踢人(例如像账号服务这种不能让你链接太长时间。)
+        if(/*m_bKickConnWhenTimeOut == 1 && */m_ifTimeOutKick == 1) 
         {
             //到时间直接踢出去的需求
             zdClosesocketProc(p_Conn); 
         }            
-        else if( (cur_time - p_Conn->lastPingTime ) > (m_iWaitTime*3+10) ) //超时踢的判断标准就是 每次检查的时间间隔*3，超过这个时间没发送心跳包，就踢【大家可以根据实际情况自由设定】
+        else if((cur_time - p_Conn->lastPingTime) > (m_iWaitTime*3+10) ) //超时踢的判断标准就是 每次检查的时间间隔*3，超过这个时间没发送心跳包，就踢
         {
             //踢出去【如果此时此刻该用户正好断线，则这个socket可能立即被后续上来的连接复用  如果真有人这么倒霉，赶上这个点了，那么可能错踢，错踢就错踢】            
             //ngx_log_stderr(0,"时间到不发心跳包，踢出去!");   //感觉OK

@@ -120,7 +120,7 @@ bool CSocekt::InitForSubProc()
 
     {
         //3.创建定时踢人的线程
-        if(m_ifkickTimeCount == 1)  //是否开启踢人时钟
+        if(m_bKickConnWhenTimeOut == 1)  //是否开启踢人时钟
         {
             ThreadItemInSocket *pThreadItemInSocket = new ThreadItemInSocket(this);//专门用来处理到期不发心跳包的用户踢出的线程
             m_threadItemVec.push_back(pThreadItemInSocket); 
@@ -155,7 +155,9 @@ void CSocekt::ShutdownSubProc()
 {
     //(1)把干活的线程停止掉，注意 系统应该尝试通过设置 g_processStopFlag = 1来 开始让整个项目停止
     //(2)用到信号量的，可能还需要调用一下sem_post
-    if(sem_post(&m_semEventSendQueue)==-1)  //让ServerSendQueueThread()流程走下来干活
+
+    //唤醒发送消息的线程，让其快点干完剩下的活 把剩余的数据都发给客户端后再优雅的退出。
+    if(sem_post(&m_semEventSendQueue)==-1)  
     {
          ngx_log_stderr(0,"CSocekt::ShutdownSubProc()中sem_post(&m_semEventSendQueue)失败.");
     }
@@ -204,18 +206,27 @@ void CSocekt::_ClearMsgSendQueue()
 void CSocekt::ReadConf()
 {
     CConfig *p_config = CConfig::GetInstance();
-    m_workerProcessorConnMaxCnt      = p_config->GetIntDefault("worker_connections",m_workerProcessorConnMaxCnt);              //epoll连接的最大项数
-    m_listenPortsCnt         = p_config->GetIntDefault("ListenPortCount",m_listenPortsCnt);                    //取得要监听的端口数量
-    m_recycleConnAfterTime  = p_config->GetIntDefault("Sock_RecyConnectionWaitTime",m_recycleConnAfterTime); //等待这么些秒后才回收连接
+    //epoll连接的最大项数
+    m_workerProcessorConnMaxCnt = p_config->GetIntDefault("worker_connections",m_workerProcessorConnMaxCnt);
+    //取得要监听的端口数量
+    m_listenPortsCnt = p_config->GetIntDefault("ListenPortCount",m_listenPortsCnt);  
+    //等待这么些秒后才回收连接                  
+    m_recycleConnAfterTime = p_config->GetIntDefault("Sock_RecyConnectionWaitTime",m_recycleConnAfterTime); 
 
-    m_ifkickTimeCount         = p_config->GetIntDefault("Sock_WaitTimeEnable",0);                                //是否开启踢人时钟，1：开启   0：不开启
-	m_iWaitTime               = p_config->GetIntDefault("Sock_MaxWaitTime",m_iWaitTime);                         //多少秒检测一次是否 心跳超时，只有当Sock_WaitTimeEnable = 1时，本项才有用	
-	m_iWaitTime               = (m_iWaitTime > 5)?m_iWaitTime:5;                                                 //不建议低于5秒钟，因为无需太频繁
-    m_ifTimeOutKick           = p_config->GetIntDefault("Sock_TimeOutKick",0);                                   //当时间到达Sock_MaxWaitTime指定的时间时，直接把客户端踢出去，只有当Sock_WaitTimeEnable = 1时，本项才有用 
+    //是否开启踢人时钟，1：开启 0：不开启
+    m_bKickConnWhenTimeOut = p_config->GetIntDefault("Sock_WaitTimeEnable",0);   
+    //多少秒检测一次是否 心跳超时，只有当Sock_WaitTimeEnable = 1时，本项才有用	                             
+	m_iWaitTime = p_config->GetIntDefault("Sock_MaxWaitTime",m_iWaitTime);    
+	m_iWaitTime = (m_iWaitTime > 5) ? m_iWaitTime:5;//不建议低于5秒钟，因为无需太频繁  
+    //当时间到达Sock_MaxWaitTime指定的时间时，直接把客户端踢出去，只有当Sock_WaitTimeEnable = 1时，本项才有用                                                     
+    m_ifTimeOutKick = p_config->GetIntDefault("Sock_TimeOutKick", 0); 
 
-    m_floodAkEnable          = p_config->GetIntDefault("Sock_FloodAttackKickEnable",0);                          //Flood攻击检测是否开启,1：开启   0：不开启
-	m_floodTimeInterval      = p_config->GetIntDefault("Sock_FloodTimeInterval",100);                            //表示每次收到数据包的时间间隔是100(毫秒)
-	m_floodKickCount         = p_config->GetIntDefault("Sock_FloodKickCounter",10);                              //累积多少次踢出此人
+    //Flood攻击检测是否开启,1：开启   0：不开启
+    m_floodAkEnable = p_config->GetIntDefault("Sock_FloodAttackKickEnable",0);   
+    //表示每次收到数据包的时间间隔是100(毫秒)                       
+	m_floodTimeInterval = p_config->GetIntDefault("Sock_FloodTimeInterval",100); 
+    //累积多少次踢出此人                           
+	m_floodAtkMaxCnt = p_config->GetIntDefault("Sock_FloodKickCounter",10);                              
 
     return;
 }
@@ -224,24 +235,20 @@ void CSocekt::ReadConf()
 //在创建worker进程之前就要执行这个函数；
 bool CSocekt::_NgxOpenListeningSockets()
 {    
-    int                isock;                //socket
-    struct sockaddr_in serv_addr;            //服务器的地址结构体
-    int                iport;                //端口
-    char               strinfo[100];         //临时字符串 
-   
-    //初始化相关
-    memset(&serv_addr,0,sizeof(serv_addr));  //先初始化一下
-    serv_addr.sin_family = AF_INET;                //选择协议族为IPV4
-    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY); //监听本地所有的IP地址；INADDR_ANY表示的是一个服务器上所有的网卡（服务器可能不止一个网卡）多个本地ip地址都进行绑定端口号，进行侦听。
+    char strinfo[100];//临时字符串 
+    //服务器的地址结构体
+    struct sockaddr_in serv_addr;            
+    memset(&serv_addr,0,sizeof(serv_addr));//先初始化一下
+    serv_addr.sin_family = AF_INET; //选择协议族为IPV4
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);//监听本地所有的IP地址；INADDR_ANY表示的是一个服务器上所有的网卡（服务器可能不止一个网卡）多个本地ip地址都进行绑定端口号，进行侦听。
 
-    //中途用到一些配置信息
     CConfig *p_config = CConfig::GetInstance();
     for(int i = 0; i < m_listenPortsCnt; i++) //要监听这么多个端口
     {        
         //参数1：AF_INET：使用ipv4协议，一般就这么写
         //参数2：SOCK_STREAM：使用TCP，表示可靠连接【相对还有一个UDP套接字，表示不可靠连接】
         //参数3：给0，固定用法，就这么记
-        isock = socket(AF_INET,SOCK_STREAM,0); //系统函数，成功返回非负描述符，出错返回-1
+        int isock = socket(AF_INET,SOCK_STREAM,0); //系统函数，成功返回非负描述符，出错返回-1
         if(isock == -1)
         {
             ngx_log_stderr(errno,"CSocekt::Initialize()中socket()失败,i=%d.",i);
@@ -261,8 +268,7 @@ bool CSocekt::_NgxOpenListeningSockets()
             return false;
         }
 
-        //为处理惊群问题使用reuseport
-        
+        //Todo:为处理惊群问题使用reuseport
         int reuseport = 1;
         if (setsockopt(isock, SOL_SOCKET, SO_REUSEPORT,(const void *) &reuseport, sizeof(int))== -1) //端口复用需要内核支持
         {
@@ -286,7 +292,7 @@ bool CSocekt::_NgxOpenListeningSockets()
         //设置本服务器要监听的地址和端口，这样客户端才能连接到该地址和端口并发送数据        
         strinfo[0] = 0;
         sprintf(strinfo,"ListenPort%d",i);
-        iport = p_config->GetIntDefault(strinfo,10000);
+        int iport = p_config->GetIntDefault(strinfo,10000);
         serv_addr.sin_port = htons((in_port_t)iport);   //in_port_t其实就是uint16_t
 
         //绑定服务器地址结构体
@@ -313,6 +319,7 @@ bool CSocekt::_NgxOpenListeningSockets()
         ngx_log_error_core(NGX_LOG_INFO,0,"监听%d端口成功!",iport); //显示一些信息到日志中
         m_listenSocketVec.push_back(p_listensocketitem);          //加入到队列中
     } 
+
     if(m_listenSocketVec.size() <= 0)  //不可能一个端口都不监听吧
         return false;
     return true;
@@ -349,25 +356,24 @@ bool CSocekt::_SetNonBlocking(int sockfd)
     */
 }
 
-//关闭socket，什么时候用，我们现在先不确定，先把这个函数预备在这里
+//Todo:这个方法暂时没用到。
 void CSocekt::_NgxCloselisteningSockets()
 {
-    for(int i = 0; i < m_listenPortsCnt; i++) //要关闭这么多个监听端口
+    for(int i = 0; i < m_listenPortsCnt; i++)
     {  
         //ngx_log_stderr(0,"端口是%d,socketid是%d.",m_listenSocketVec[i]->port,m_listenSocketVec[i]->fd);
         close(m_listenSocketVec[i]->fd);
         ngx_log_error_core(NGX_LOG_INFO,0,"关闭监听端口%d!",m_listenSocketVec[i]->port); //显示一些信息到日志中
-    }//end for(int i = 0; i < m_listenPortsCnt; i++)
+    }
     return;
 }
 
+/////////////发送消息队列的生产者!!!
 //将一个待发送消息入到发消息队列中
 void CSocekt::_PushMsgToSendQueue(char *pSendBufPos) 
 {
     CMemory *pMemoryInstance = CMemory::GetInstance();
-
-    CLock lock(&m_sendMsgQueueMutex);  //互斥量
-
+    CLock lock(&m_sendMsgQueueMutex); 
     //发送消息队列过大也可能给服务器带来风险
     if(m_sendMsgSize > 50000)
     {
@@ -395,8 +401,8 @@ void CSocekt::_PushMsgToSendQueue(char *pSendBufPos)
     m_sendMsgQueue.push_back(pSendBufPos);     
     ++m_sendMsgSize;   //原子操作
 
-    //将信号量的值+1,这样其他卡在sem_wait的就可以走下去
-    if(sem_post(&m_semEventSendQueue)==-1)  //让ServerSendQueueThread()流程走下来干活
+    //发送消息队列 来了一个可供发送的数据,唤醒阻塞在条件变量等待可供发送数据的线程
+    if(sem_post(&m_semEventSendQueue)==-1)
     {
         ngx_log_stderr(0,"CSocekt::_PushMsgToSendQueue()中sem_post(&m_semEventSendQueue)失败.");      
     }
@@ -407,9 +413,9 @@ void CSocekt::_PushMsgToSendQueue(char *pSendBufPos)
 //这个函数是可能被多线程调用的，但是即便被多线程调用，也没关系，不影响本服务器程序的稳定性和正确运行性
 void CSocekt::zdClosesocketProc(NgxConnectionInfo* pConn)
 {
-    if(m_ifkickTimeCount == 1)
+    if(m_bKickConnWhenTimeOut == 1)
     {
-        _DeleteFromTimerQueue(pConn); //从时间队列中把连接干掉
+        _DeleteConnFromTimerQueue(pConn); //从时间队列中把连接干掉
     }
     if(pConn->fd != -1)
     {   
@@ -417,8 +423,8 @@ void CSocekt::zdClosesocketProc(NgxConnectionInfo* pConn)
         pConn->fd = -1;
     }
 
-    if(pConn->iThrowsendCount > 0)  
-        --pConn->iThrowsendCount;   //归0
+    if(pConn->iConnWaitEpollOutCntsWhenNotSendAll > 0)  
+        --pConn->iConnWaitEpollOutCntsWhenNotSendAll;   //归0
 
     _inRecycleConnQueue(pConn);
     return;
@@ -427,9 +433,9 @@ void CSocekt::zdClosesocketProc(NgxConnectionInfo* pConn)
 //测试是否flood攻击成立，成立则返回true，否则返回false
 bool CSocekt::_TestFlood(NgxConnectionInfo* pConn)
 {
-    struct  timeval sCurrTime;   //当前时间结构
-	uint64_t        iCurrTime;   //当前时间（单位：毫秒）
-	bool  reco      = false;
+    struct timeval sCurrTime;//当前时间结构
+	uint64_t iCurrTime;   //当前时间（单位：毫秒）
+	bool reco  = false;
 	
 	gettimeofday(&sCurrTime, NULL); //取得当前时间
     iCurrTime =  (sCurrTime.tv_sec * 1000 + sCurrTime.tv_usec / 1000);  //毫秒
@@ -446,9 +452,9 @@ bool CSocekt::_TestFlood(NgxConnectionInfo* pConn)
 		pConn->FloodkickLastTime = iCurrTime;
 	}
 
-    //ngx_log_stderr(0,"pConn->FloodAttackCount=%d,m_floodKickCount=%d.",pConn->FloodAttackCount,m_floodKickCount);
+    //ngx_log_stderr(0,"pConn->FloodAttackCount=%d,m_floodAtkMaxCnt=%d.",pConn->FloodAttackCount,m_floodAtkMaxCnt);
 
-	if(pConn->FloodAttackCount >= m_floodKickCount)
+	if(pConn->FloodAttackCount >= m_floodAtkMaxCnt)
 	{
 		//可以踢此人的标志
 		reco = true;
@@ -705,8 +711,8 @@ int CSocekt::NgxEpollProcessEvents(int timer)
                 //8221 = ‭0010 0000 0001 1101‬  ：包括 EPOLLRDHUP ，EPOLLHUP， EPOLLERR
                 //ngx_log_stderr(errno,"CSocekt::NgxEpollProcessEvents()中revents&EPOLLOUT成立并且revents & (EPOLLERR|EPOLLHUP|EPOLLRDHUP)成立,event=%ud。",revents); 
 
-                //我们只有投递了 写事件，但对端断开时，程序流程才走到这里，投递了写事件意味着 iThrowsendCount标记肯定被+1了，这里我们减回
-                --pConn->iThrowsendCount;                 
+                //我们只有投递了 写事件，但对端断开时，程序流程才走到这里，投递了写事件意味着 iConnWaitEpollOutCntsWhenNotSendAll标记肯定被+1了，这里我们减回
+                --pConn->iConnWaitEpollOutCntsWhenNotSendAll;                 
             }
             else
             {
@@ -768,7 +774,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
                     continue;
                 }
 
-                if(pConnInfo->iThrowsendCount > 0)//当前连接的已经出现发送不出去了(例如可能客户端的接收缓冲区已经满了!)
+                if(pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll > 0)//当前连接的已经出现发送不出去了(例如可能客户端的接收缓冲区已经满了!)
                 {
                     //这个连接靠系统驱动来发送消息，所以这里不能再发送
                     pos++;
@@ -805,7 +811,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
                         //全部发送成功了
                         pMemoryInstance->FreeMemory(pConnInfo->ptrNewMemForSend);
                         pConnInfo->ptrNewMemForSend = NULL;
-                        pConnInfo->iThrowsendCount = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的                        
+                        pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的                        
                         //ngx_log_stderr(0,"CSocekt::ServerSendQueueThread()中数据发送完毕，很好。"); //做个提示吧，商用时可以干掉
                     }
                     else//没有全部发送完毕(EAGAIN)，数据只发出去了一部分，因为该socket的发送缓冲区满了
@@ -815,7 +821,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
 				        pConnInfo->lessSendSize = pConnInfo->lessSendSize - sendsize;	
                         
                         //标记发送缓冲区满了，需要通过epoll事件来驱动消息的继续发送
-                        ++pConnInfo->iThrowsendCount;//【原子+1，且不可写成p_Conn->iThrowsendCount = pConn->iThrowsendCount +1 ，这种写法不是原子+1】
+                        ++pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll;//【原子+1，且不可写成p_Conn->iConnWaitEpollOutCntsWhenNotSendAll = pConn->iConnWaitEpollOutCntsWhenNotSendAll +1 ，这种写法不是原子+1】
 
                         //后续等待该连接出现可写通知 epoll驱动调用ngx_write_request_handler()函数发送数据
                         if(pSocketObj->NgxEpollOperatorEvent(
@@ -837,7 +843,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
                 else if(sendsize == -1)
                 {
                     //发送缓冲区已经满了【一个字节都没发出去，说明发送 缓冲区当前正好是满的】
-                    ++pConnInfo->iThrowsendCount; //标记发送缓冲区满了，需要通过epoll事件来驱动消息的继续发送
+                    ++pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll; //标记发送缓冲区满了，需要通过epoll事件来驱动消息的继续发送
                     //投递此事件后，我们将依靠epoll驱动调用ngx_write_request_handler()函数发送数据
                     if(pSocketObj->NgxEpollOperatorEvent(
                                 pConnInfo->fd,         //socket句柄
@@ -861,7 +867,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
                     //ngx_log_stderr(errno,"CSocekt::ServerSendQueueThread()中sendproc()居然返回0？"); //如果对方关闭连接出现send=0，那么这个日志可能会常出现，商用时就 应该干掉
                     pMemoryInstance->FreeMemory(pConnInfo->ptrNewMemForSend);  //释放内存
                     pConnInfo->ptrNewMemForSend = NULL;
-                    pConnInfo->iThrowsendCount = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的    
+                    pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的    
                     continue;
                 }
                 else
@@ -869,7 +875,7 @@ void* CSocekt::ServerSendQueueThread(void* threadData)//静态函数
                     //能走到这里的，应该就是返回值-2了，一般就认为对端断开了，等待recv()来做断开socket以及回收资源
                     pMemoryInstance->FreeMemory(pConnInfo->ptrNewMemForSend);  //释放内存
                     pConnInfo->ptrNewMemForSend = NULL;
-                    pConnInfo->iThrowsendCount = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的  
+                    pConnInfo->iConnWaitEpollOutCntsWhenNotSendAll = 0;  //这行其实可以没有，因此此时此刻这东西就是=0的  
                     continue;
                 }
             }

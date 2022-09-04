@@ -158,7 +158,7 @@ ssize_t CSocekt::_RecvFromClient(NgxConnectionInfo* pConn,char *buff,ssize_t buf
         //ngx_log_stderr(0,"连接被客户端 非 正常关闭！");
 
         //这种真正的错误就要，直接关闭套接字，释放连接池中连接了
-        //_NgxCloseConn(pConn);
+        //_NgxFreeConnAndCloseConnFd(pConn);
         //_inRecycleConnQueue(pConn);
         zdClosesocketProc(pConn);
         return -1;
@@ -325,7 +325,7 @@ void CSocekt::_NgxWriteRequestHandler(NgxConnectionInfo* pConn)
         return;
     }
 
-    if(sendSize > 0 && sendSize == pConn->lessSendSize) //成功发送完毕，做个通知是可以的；
+    if(sendSize > 0 && sendSize == pConn->lessSendSize)
     {
         //如果是成功的发送完毕数据，则把写事件通知从epoll中干掉吧；其他情况，那就是断线了，等着系统内核把连接从红黑树中干掉即可；
         if(NgxEpollOperatorEvent(
@@ -352,13 +352,13 @@ void CSocekt::_NgxWriteRequestHandler(NgxConnectionInfo* pConn)
 
     pMemoryInstance->FreeMemory(pConn->ptrNewMemForSend);  //释放内存
     pConn->ptrNewMemForSend = NULL;        
-    --pConn->iThrowsendCount;  //建议放在最后执行
+    --pConn->iConnWaitEpollOutCntsWhenNotSendAll;  //建议放在最后执行
     */
     //2019.4.2调整成新顺序
     pMemoryInstance->FreeMemory(pConn->ptrNewMemForSend);  //释放内存
     pConn->ptrNewMemForSend = NULL; 
 
-    --pConn->iThrowsendCount;//这个值恢复了，触发下面一行的信号量才有意义
+    --pConn->iConnWaitEpollOutCntsWhenNotSendAll;//这个值恢复了，触发下面一行的信号量才有意义
     if(sem_post(&m_semEventSendQueue)==-1)       
         ngx_log_stderr(0,"CSocekt::_NgxWriteRequestHandler()中sem_post(&m_semEventSendQueue)失败.");
 

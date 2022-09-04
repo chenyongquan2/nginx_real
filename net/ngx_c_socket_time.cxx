@@ -67,16 +67,19 @@ NgxExtraMsgHeaderInfo* CSocekt::_GetOverTimeTimerr(time_t cur_time)
 		//这回确实是有到时间的了【超时的节点】
 		ptmp = _RemoveFirstTimer();    //把这个超时的节点从 m_timerQueueMap 删掉，并把这个节点的第二项返回来；
 
-		if(/*m_ifkickTimeCount == 1 && */m_ifTimeOutKick != 1)  //能调用到本函数第一个条件肯定成立，所以第一个条件加不加无所谓，主要是第二个条件
+		//一定是开启了踢人时钟 才能有机会走进来这个函数里面的。所以m_bKickConnWhenTimeOut肯定为1
+		ASSERT(m_bKickConnWhenTimeOut == 1);
+		//m_ifTimeOutKick表示是否开启了超时踢人
+		if(/*m_bKickConnWhenTimeOut == 1 && */m_ifTimeOutKick != 1)  
 		{
-			//如果不是要求超时就提出，则才做这里的事：
+			//如果不是要求超时就提出，则有这里的心跳包检测逻辑!
 
 			//因为下次超时的时间我们也依然要判断，所以还要把这个节点加回来        
-			time_t newinqueutime = cur_time+(m_iWaitTime);
+			time_t nextCheckTime = cur_time + m_iWaitTime;
 			NgxExtraMsgHeaderInfo* tmpMsgHeader = (NgxExtraMsgHeaderInfo*)p_memory->AllocMemory(sizeof(NgxExtraMsgHeaderInfo),false);
 			tmpMsgHeader->pConn = ptmp->pConn;
 			tmpMsgHeader->iCurrsequence = ptmp->iCurrsequence;			
-			m_timerQueueMap.insert(std::make_pair(newinqueutime,tmpMsgHeader)); //自动排序 小->大			
+			m_timerQueueMap.insert(std::make_pair(nextCheckTime,tmpMsgHeader)); //自动排序 小->大			
 			m_timerQueueMapSize++;       
 		}
 
@@ -90,11 +93,10 @@ NgxExtraMsgHeaderInfo* CSocekt::_GetOverTimeTimerr(time_t cur_time)
 }
 
 //把指定用户tcp连接从timer表中抠出去
-void CSocekt::_DeleteFromTimerQueue(NgxConnectionInfo* pConn)
+void CSocekt::_DeleteConnFromTimerQueue(NgxConnectionInfo* pConn)
 {
     std::multimap<time_t, NgxExtraMsgHeaderInfo*>::iterator pos,posend;
 	CMemory *p_memory = CMemory::GetInstance();
-
     CLock lock(&m_timeQueueMutex);
 
     //因为实际情况可能比较复杂，将来可能还扩充代码等等，所以如下我们遍历整个队列找 一圈，而不是找到一次就拉倒，以免出现什么遗漏
@@ -154,29 +156,34 @@ void* CSocekt::ServerTimerQueueMonitorThread(void* threadData)
             if(absolute_time < cur_time)
             {
                 //时间到了，可以处理了
-                std::list<NgxExtraMsgHeaderInfo*> m_lsIdleList; //保存要处理的内容
+                std::list<NgxExtraMsgHeaderInfo*> m_timeOutMsgHeaderInfoList; //保存要处理的内容
                 NgxExtraMsgHeaderInfo* result;
 
                 err = pthread_mutex_lock(&pSocketObj->m_timeQueueMutex);  
-                if(err != 0) ngx_log_stderr(err,"CSocekt::ServerTimerQueueMonitorThread()中pthread_mutex_lock()失败，返回的错误码为%d!",err);//有问题，要及时报告
+                if(err != 0) 
+					ngx_log_stderr(err,"CSocekt::ServerTimerQueueMonitorThread()中pthread_mutex_lock()失败，返回的错误码为%d!",err);
+				
                 while ((result = pSocketObj->_GetOverTimeTimerr(cur_time)) != NULL) //一次性的把所有超时节点都拿过来
 				{
-					m_lsIdleList.push_back(result); 
-				}//end while
+					m_timeOutMsgHeaderInfoList.push_back(result); 
+				}
+
                 err = pthread_mutex_unlock(&pSocketObj->m_timeQueueMutex); 
-                if(err != 0)  ngx_log_stderr(err,"CSocekt::ServerTimerQueueMonitorThread()pthread_mutex_unlock()失败，返回的错误码为%d!",err);//有问题，要及时报告                
-                NgxExtraMsgHeaderInfo* tmpmsg;
-                while(!m_lsIdleList.empty())
+                if(err != 0)  
+					ngx_log_stderr(err,"CSocekt::ServerTimerQueueMonitorThread()pthread_mutex_unlock()失败，返回的错误码为%d!",err);    
+				   
+
+                while(!m_timeOutMsgHeaderInfoList.empty())
                 {
-                    tmpmsg = m_lsIdleList.front();
-					m_lsIdleList.pop_front(); 
-                    pSocketObj->DoPingTimeOutChecking(tmpmsg,cur_time); //这里需要检查心跳超时问题
-                } //end while(!m_lsIdleList.empty())
+                    NgxExtraMsgHeaderInfo* pMsgHeaderInfo = m_timeOutMsgHeaderInfoList.front();
+					m_timeOutMsgHeaderInfoList.pop_front(); 
+                    pSocketObj->DoPingTimeOutChecking(pMsgHeaderInfo, cur_time); //这里需要检查心跳超时问题
+                } 
             }
-        } //end if(pSocketObj->m_timerQueueMapSize > 0)
-        
+        } 
         usleep(500 * 1000); //为简化问题，我们直接每次休息500毫秒
-    } //end while
+
+    } 
 
     return (void*)0;
 }

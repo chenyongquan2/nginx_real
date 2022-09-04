@@ -146,7 +146,7 @@ void CSocekt::_NgxAcceptConn(NgxConnectionInfo* pListenConnInfo)
             if(_SetNonBlocking(newConnSocketFd) == false)
             {
                  //关闭socket,这种可以立即回收这个连接，无需延迟，因为其上还没有数据收发，谈不到业务逻辑因此无需延迟
-                _NgxCloseConn(pNewConn);
+                _NgxFreeConnAndCloseConnFd(pNewConn);
                 return; //直接返回
             }
         }
@@ -167,7 +167,7 @@ void CSocekt::_NgxAcceptConn(NgxConnectionInfo* pListenConnInfo)
         ) == -1)         
         {
             //增加事件失败，失败日志在ngx_epoll_add_event中写过了，因此这里不多写啥；
-            _NgxCloseConn(pNewConn);//关闭socket,这种可以立即回收这个连接，无需延迟，因为其上还没有数据收发，谈不到业务逻辑因此无需延迟；
+            _NgxFreeConnAndCloseConnFd(pNewConn);//关闭socket,这种可以立即回收这个连接，无需延迟，因为其上还没有数据收发，谈不到业务逻辑因此无需延迟；
             return; //直接返回
         }
         /*
@@ -195,7 +195,8 @@ void CSocekt::_NgxAcceptConn(NgxConnectionInfo* pListenConnInfo)
         }
         */
 
-        if(m_ifkickTimeCount == 1)
+        //将新建立的链接给加入到定时检测队列里面。
+        if(m_bKickConnWhenTimeOut == 1)
         {
             _AddToTimerQueue(pNewConn);
         }

@@ -8,9 +8,8 @@
 //一个信号有关的结构 NgxSignalInfo
 struct NgxSignalInfo
 {
-    int           signo;       //信号对应的数字编号 ，每个信号都有对应的#define ，大家已经学过了 
-    const  char   *signame;    //信号对应的中文名字 ，比如SIGHUP 
-
+    int signo; //信号对应的数字编号 ，每个信号都有对应的#define ，大家已经学过了 
+    const char* signame; //信号对应的中文名字 ，比如SIGHUP 
     //信号处理函数,这个函数由我们自己来提供，但是它的参数和返回值是固定的【操作系统就这样要求】,大家写的时候就先这么写，也不用思考这么多；
     void  (*handler)(int signo, siginfo_t *siginfo, void *ucontext); //函数指针,   siginfo_t:系统定义的结构
 };
@@ -40,7 +39,8 @@ NgxSignalInfo signalInfoVec[] = {
 int NgxRegisterSignalsHandle()
 {
     NgxSignalInfo *sig; 
-    struct sigaction sa;   //sigaction：系统定义的跟信号有关的一个结构，我们后续调用系统的sigaction()函数时要用到这个同名的结构
+    //sigaction：系统定义的跟信号有关的一个结构，我们后续调用系统的sigaction()函数时要用到这个同名的结构
+    struct sigaction sa;   
 
     for (sig = signalInfoVec; sig->signo != 0; sig++)  //将signo ==0作为一个标记，因为信号的编号都不为0；
     {        

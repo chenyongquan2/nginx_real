@@ -198,10 +198,14 @@ static void NgxWorkerProcessInit(int inum)
     
     sleep(1); //再休息1秒；
 
-    if(g_socket.InitForSubProc() == false) //初始化子进程需要具备的一些多线程能力相关的信息
-        exit(-2);//内存没释放，但是简单粗暴退出；
+    //1初始化子进程需要具备的一些多线程能力相关的信息 2并且创建相关的线程(这些线程启动后会分别阻塞等待对应的信号/信号量/通知)
+    if(g_socket.InitForSubProc() == false) 
+        exit(-2);
 
     //1初始化epoll相关内容，2.初始化连接池 3同时往监听listen socket分配连接conn 并且添加到epoll
+    //思考:由于listen socket是在主进程里面创建出来的，
+    //所以主进程和四个进程都会有这个listen socket，
+    //但是只有子进程将其添加进去了epoll，因此只有子进程才会收到这些监听socket的事件.
     g_socket.NgxInitEpollAndConnPool(); 
     
 }

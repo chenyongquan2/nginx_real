@@ -11,15 +11,17 @@
 
 //---------------------------------------------------------------
 //连接池成员函数
-NgxConnectionInfo::NgxConnectionInfo()//构造函数
+NgxConnectionInfo::NgxConnectionInfo()
 {		
     iCurrsequence = 0;    
-    pthread_mutex_init(&logicPorcMutex, NULL); //互斥量初始化
+    pthread_mutex_init(&logicPorcMutex, NULL); 
 }
-NgxConnectionInfo::~NgxConnectionInfo()//析构函数
+
+NgxConnectionInfo::~NgxConnectionInfo()
 {
-    pthread_mutex_destroy(&logicPorcMutex);    //互斥量释放
+    pthread_mutex_destroy(&logicPorcMutex);
 }
+
 //分配出去一个连接的时候初始化一些内容,原来内容放在 _NgxGetFreeConn()里，现在放在这里
 void NgxConnectionInfo::initConnectionInfo()
 {
@@ -31,7 +33,7 @@ void NgxConnectionInfo::initConnectionInfo()
     lessRecvSize = sizeof(NgxPkgHeaderInfo);               //这里指定收数据的长度，这里先要求收包头这么长字节的数据
     
     ptrNewMemForRecv   = NULL;                         //既然没new内存，那自然指向的内存地址先给NULL
-    iThrowsendCount   = 0;                            //原子的
+    iConnWaitEpollOutCntsWhenNotSendAll   = 0;                            //原子的
     ptrNewMemForSend   = NULL;                         //发送数据头指针记录
     events            = 0;                            //epoll事件先给0 
     lastPingTime      = time(NULL);                   //上次ping的时间
@@ -55,7 +57,7 @@ void NgxConnectionInfo::resetAndFreeConnectionInfo()
         CMemory::GetInstance()->FreeMemory(ptrNewMemForSend);
         ptrNewMemForSend = NULL;
     }
-    iThrowsendCount = 0;                              //设置不设置感觉都行         
+    iConnWaitEpollOutCntsWhenNotSendAll = 0;                              //设置不设置感觉都行         
 }
 
 //初始化连接池
@@ -144,7 +146,7 @@ NgxConnectionInfo* CSocekt::_NgxGetFreeConn(int isock)
     c->lessRecvSize = sizeof(NgxPkgHeaderInfo);               //这里指定收数据的长度，这里先要求收包头这么长字节的数据
 
     c->ptrNewMemForRecv = NULL;                            //既然没new内存，那自然指向的内存地址先给NULL
-    c->iThrowsendCount = 0;                              //原子的
+    c->iConnWaitEpollOutCntsWhenNotSendAll = 0;                              //原子的
     c->ptrNewMemForSend = NULL;                          //发送数据头指针记录
     //....其他内容再增加
 
@@ -159,7 +161,7 @@ NgxConnectionInfo* CSocekt::_NgxGetFreeConn(int isock)
 }
 
 //归还参数pConn所代表的连接到到连接池中，注意参数类型是lpngx_connection_t
-void CSocekt::_NgxFreeConn(NgxConnectionInfo* pConn) 
+void CSocekt::_NgxFreeConnToFreeList(NgxConnectionInfo* pConn) 
 {
     //因为有线程可能要动连接池中连接，所以在合理互斥也是必要的
     CLock lock(&m_connMutex);  
@@ -169,9 +171,7 @@ void CSocekt::_NgxFreeConn(NgxConnectionInfo* pConn)
 
     //扔到空闲连接列表里
     m_freeConnList.push_back(pConn);
-
-    //空闲连接数+1
-    ++m_freeConnCnt;
+    ++m_freeConnCnt;//空闲连接数+1
 
     /*
     if(c->ptrNewMemForRecv != NULL)
@@ -191,7 +191,7 @@ void CSocekt::_NgxFreeConn(NgxConnectionInfo* pConn)
 
     //节点本身也要干一些事
     ++c->iCurrsequence;                                  //回收后，该值就增加1,以用于判断某些网络事件是否过期【一被释放就立即+1也是有必要的】
-    c->iThrowsendCount = 0;                              //设置不设置感觉都行     
+    c->iConnWaitEpollOutCntsWhenNotSendAll = 0;                              //设置不设置感觉都行     
 
     m_pfree_connections = c;                             //修改 原来的链头使链头指向新节点
     ++m_freeConnCnt;                               //空闲连接多1    
@@ -200,47 +200,32 @@ void CSocekt::_NgxFreeConn(NgxConnectionInfo* pConn)
 }
 
 
-//将要回收的连接放到一个队列中来，后续有专门的线程会处理这个队列中的连接的回收
+//将要回收的连接放到一个队列中来，专门的线程会来延迟回收该链接(给点时间让该链接把手头的活给干完。)
 //有些连接，我们不希望马上释放，要隔一段时间后再释放以确保服务器的稳定，所以，我们把这种隔一段时间才释放的连接先放到一个队列中来
 void CSocekt::_inRecycleConnQueue(NgxConnectionInfo* pConn)
 {
     //ngx_log_stderr(0,"CSocekt::_inRecycleConnQueue()执行，连接入到回收队列中.");
-
-    std::list<NgxConnectionInfo*>::iterator pos;
-    bool iffind = false;
-        
     CLock lock(&m_recycleConnQueueMutex); //针对连接回收列表的互斥量，因为线程ServerRecyConnectionThread()也有要用到这个回收列表；
-
-    //如下判断防止连接被多次扔到回收站中来
-    for(pos = m_recycleConnList.begin(); pos != m_recycleConnList.end(); ++pos)
+    for(auto pos = m_recycleConnList.begin(); pos != m_recycleConnList.end(); ++pos)
 	{
 		if((*pos) == pConn)		
-		{	
-			iffind = true;
-			break;			
-		}
+			return;	//防止被多次扔到回收队列中来
 	}
-    if(iffind == true) //找到了，不必再入了
-	{
-		//我有义务保证这个只入一次嘛
-        return;
-    }
 
-    pConn->inRecyTime = time(NULL);        //记录回收时间
+    pConn->inRecyTime = time(NULL);//记录回收时间
     ++pConn->iCurrsequence;
     m_recycleConnList.push_back(pConn); //等待ServerRecyConnectionThread线程自会处理 
-    ++m_recycleConnListSize;            //待释放连接队列大小+1
-    --m_onlineUserCount;                   //连入用户数量-1
+    ++m_recycleConnListSize; //待释放连接队列大小+1
+    --m_onlineUserCount; //连入用户数量-1
     return;
 }
 
-//处理连接回收的线程
+//处理延迟回收链接的线程
 void* CSocekt::ServerRecyConnectionThread(void* threadData)
 {
     ThreadItemInSocket *pThread = static_cast<ThreadItemInSocket*>(threadData);
     CSocekt *pSocketObj = pThread->m_ptrSocket;
     
-    time_t currtime;
     int err;
     std::list<NgxConnectionInfo*>::iterator pos,posend;
     NgxConnectionInfo* pConn;
@@ -249,51 +234,46 @@ void* CSocekt::ServerRecyConnectionThread(void* threadData)
     {
         //为简化问题，我们直接每次休息200毫秒
         usleep(200 * 1000);  //单位是微妙,又因为1毫秒=1000微妙，所以 200 *1000 = 200毫秒
-
-        //不管啥情况，先把这个条件成立时该做的动作做了
-        if(pSocketObj->m_recycleConnListSize > 0)
+        if(pSocketObj->m_recycleConnListSize > 0)//原子的
         {
-            currtime = time(NULL);
+            time_t curTime = time(NULL);
             err = pthread_mutex_lock(&pSocketObj->m_recycleConnQueueMutex);  
-            if(err != 0) ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()中pthread_mutex_lock()失败，返回的错误码为%d!",err);
-
+            if(err != 0) 
+                ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()中pthread_mutex_lock()失败，返回的错误码为%d!",err);
 lblRRTD:
             pos    = pSocketObj->m_recycleConnList.begin();
 			posend = pSocketObj->m_recycleConnList.end();
             for(; pos != posend; ++pos)
             {
                 pConn = (*pos);
-                if(
-                    ( (pConn->inRecyTime + pSocketObj->m_recycleConnAfterTime) > currtime)  && (g_processStopFlag == 0) //如果不是要整个系统退出，你可以continue，否则就得要强制释放
-                    )
-                {
+                if((pConn->inRecyTime + pSocketObj->m_recycleConnAfterTime) > curTime  && g_processStopFlag == 0 )//如果不是要整个系统退出，你可以continue，否则就得要强制释放
                     continue; //没到释放的时间
-                }    
+                  
                 //到释放的时间了: 
-                //......这将来可能还要做一些是否能释放的判断[在我们写完发送数据代码之后吧]，先预留位置
-                //....
+                //这将来可能还要做一些是否能释放的判断[在我们写完发送数据代码之后吧]，先预留位置
 
-                //我认为，凡是到释放时间的，iThrowsendCount都应该为0；这里我们加点日志判断下
-                //if(pConn->iThrowsendCount != 0)
-                if(pConn->iThrowsendCount > 0)
+                //我认为，凡是到释放时间的，iConnWaitEpollOutCntsWhenNotSendAll都应该为0；这里我们加点日志判断下
+                //if(pConn->iConnWaitEpollOutCntsWhenNotSendAll != 0)
+                if(pConn->iConnWaitEpollOutCntsWhenNotSendAll > 0)
                 {
                     //这确实不应该，打印个日志吧；
-                    ngx_log_stderr(0,"CSocekt::ServerRecyConnectionThread()中到释放时间却发现p_Conn.iThrowsendCount!=0，这个不该发生");
+                    ngx_log_stderr(0,"CSocekt::ServerRecyConnectionThread()中到释放时间却发现p_Conn.iConnWaitEpollOutCntsWhenNotSendAll!=0，这个不该发生");
                     //其他先暂时啥也不敢，路程继续往下走，继续去释放吧。
                 }
 
-                //流程走到这里，表示可以释放，那我们就开始释放
-                --pSocketObj->m_recycleConnListSize;        //待释放连接队列大小-1
-                pSocketObj->m_recycleConnList.erase(pos);   //迭代器已经失效，但pos所指内容在p_Conn里保存着呢
+                //从待回收链接队列中把某一个满足延迟回收的连接给移除。
+                --pSocketObj->m_recycleConnListSize;//待释放连接队列大小-1
+                pSocketObj->m_recycleConnList.erase(pos);//迭代器已经失效，但pos所指内容在p_Conn里保存着呢
 
                 //ngx_log_stderr(0,"CSocekt::ServerRecyConnectionThread()执行，连接%d被归还.",pConn->fd);
 
-                pSocketObj->_NgxFreeConn(pConn);	   //归还参数pConn所代表的连接到到连接池中
+                pSocketObj->_NgxFreeConnToFreeList(pConn);//归还参数pConn所代表的连接到到连接池中
                 goto lblRRTD; 
-            } //end for
+            } 
             err = pthread_mutex_unlock(&pSocketObj->m_recycleConnQueueMutex); 
-            if(err != 0)  ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()pthread_mutex_unlock()失败，返回的错误码为%d!",err);
-        } //end if
+            if(err != 0)  
+                ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()pthread_mutex_unlock()失败，返回的错误码为%d!",err);
+        } 
 
         if(g_processStopFlag == 1) //要退出整个程序，那么肯定要先退出这个循环
         {
@@ -301,25 +281,28 @@ lblRRTD:
             {
                 //因为要退出，所以就得硬释放了【不管到没到时间，不管有没有其他不 允许释放的需求，都得硬释放】
                 err = pthread_mutex_lock(&pSocketObj->m_recycleConnQueueMutex);  
-                if(err != 0) ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()中pthread_mutex_lock2()失败，返回的错误码为%d!",err);
+                if(err != 0) 
+                    ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()中pthread_mutex_lock2()失败，返回的错误码为%d!",err);
 
         lblRRTD2:
-                pos    = pSocketObj->m_recycleConnList.begin();
+                pos = pSocketObj->m_recycleConnList.begin();
 			    posend = pSocketObj->m_recycleConnList.end();
                 for(; pos != posend; ++pos)
                 {
                     pConn = (*pos);
+
+                    //从待回收链接队列中把某一个满足延迟回收的连接给移除。
                     --pSocketObj->m_recycleConnListSize;        //待释放连接队列大小-1
                     pSocketObj->m_recycleConnList.erase(pos);   //迭代器已经失效，但pos所指内容在p_Conn里保存着呢
-                    pSocketObj->_NgxFreeConn(pConn);	   //归还参数pConn所代表的连接到到连接池中
+                    pSocketObj->_NgxFreeConnToFreeList(pConn);	   //归还参数pConn所代表的连接到到连接池中
                     goto lblRRTD2; 
-                } //end for
+                } 
                 err = pthread_mutex_unlock(&pSocketObj->m_recycleConnQueueMutex); 
                 if(err != 0)  ngx_log_stderr(err,"CSocekt::ServerRecyConnectionThread()pthread_mutex_unlock2()失败，返回的错误码为%d!",err);
-            } //end if
+            }
             break; //整个程序要退出了，所以break;
-        }  //end if
-    } //end while    
+        }
+    } 
     
     return (void*)0;
 }
@@ -327,10 +310,10 @@ lblRRTD:
 //用户连入，我们accept4()时，得到的socket在处理中产生失败，则资源用这个函数释放
 //当连接分配出去 但是还么用来处理各种逻辑来收发数据，则可以直接进行关闭，而无需延迟关闭。
 //大前提:因为其上还没有数据收发，谈不到业务逻辑因此无需延迟
-void CSocekt::_NgxCloseConn(NgxConnectionInfo* pConn)
+void CSocekt::_NgxFreeConnAndCloseConnFd(NgxConnectionInfo* pConn)
 {    
     //pConn->fd = -1; //官方nginx这么写，这么写有意义；    不要这个东西，回收时不要轻易东连接里边的内容
-    _NgxFreeConn(pConn); 
+    _NgxFreeConnToFreeList(pConn); 
     if(pConn->fd != -1)
     {
         close(pConn->fd);

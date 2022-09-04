@@ -25,15 +25,15 @@ typedef void (CSocekt::*NgxEventDealFuncPtr)(NgxConnectionInfo *c); //定义成�
 //(1)该结构表示一个TCP连接【客户端主动发起的、Nginx服务器被动接受的TCP连接】
 struct NgxConnectionInfo
 {
+public:
 	NgxConnectionInfo();
 	virtual ~NgxConnectionInfo();
 	void initConnectionInfo();		   //分配出去的时候初始化一些内容
 	void resetAndFreeConnectionInfo(); //回收回来的时候做一些事情
 
-
+public:
 	int fd;//套接字句柄socket
 	NgxListeningInfo *listening; //如果这个链接被分配给了一个监听套接字，那么这个里边就指向监听套接字对应的那个lpngx_listening_t的内存首地址
-
 
 	uint64_t iCurrsequence;//我引入的一个序号，每次分配出去时+1，此法也有可能在一定程度上检测错包废包，具体怎么用，用到了再说
 	struct sockaddr s_sockaddr;//保存对方地址信息用的
@@ -48,16 +48,16 @@ struct NgxConnectionInfo
 	unsigned char curStat;			   //当前收包的状态
 	char dataHeadInfo[_DATA_BUFSIZE_]; //用于保存收到的数据的包头信息
 	char *pRecvBufPos; //接收数据的缓冲区的头指针，对收到不全的包非常有用，看具体应用的代码
-	unsigned int lessRecvSize;//要收到多少数据，由这个变量指定，和precvbuf配套使用，看具体应用的代码
+	unsigned int lessRecvSize;///剩余要收到多少数据
 	char *ptrNewMemForRecv; //new出来的用于收包的内存首地址，释放用的
 
 	pthread_mutex_t logicPorcMutex; //逻辑处理相关的互斥量
 
 	//和发包有关
-	std::atomic<int> iThrowsendCount; //发送消息，如果发送缓冲区满了，则需要通过epoll事件来驱动消息的继续发送，所以如果发送缓冲区满，则用这个变量标记
+	std::atomic<int> iConnWaitEpollOutCntsWhenNotSendAll; //发送消息，如果发送缓冲区满了，则需要通过epoll事件来驱动消息的继续发送，所以如果发送缓冲区满，则用这个变量标记
 	char *ptrNewMemForSend;//发送完成后释放用的，整个数据的头指针，其实是 消息头 + 包头 + 包体
 	char *pSendBufPos;	//发送数据的缓冲区的头指针，开始 其实是包头+包体
-	unsigned int lessSendSize;//要发送多少数据
+	unsigned int lessSendSize;//剩余要发送多少数据
 
 	//和回收有关
 	time_t inRecyTime; //入到资源回收站里去的时间
@@ -112,8 +112,6 @@ protected:
 	//主动关闭一个连接时的要做些善后的处理函数
 	void zdClosesocketProc(NgxConnectionInfo *p_Conn);
 
-	
-
 private:
 	//监听端口相关
 	bool _NgxOpenListeningSockets();	//监听必须的端口【支持多个端口】
@@ -140,12 +138,12 @@ private:
 	void _ClearMsgSendQueue(); //处理发送消息队列
 private:
 	//连接池/连接相关
-	void _InitConnPool();								//初始化连接池
-	void _ClearConnPool();								//回收连接池
-	NgxConnectionInfo *_NgxGetFreeConn(int isock);	//从连接池中获取一个空闲连接
-	void _NgxFreeConn(NgxConnectionInfo *pConn); //归还参数pConn所代表的连接到到连接池中
+	void _InitConnPool();//初始化连接池
+	void _ClearConnPool();//回收连接池
+	NgxConnectionInfo *_NgxGetFreeConn(int isock);//从连接池中获取一个空闲连接
+	void _NgxFreeConnToFreeList(NgxConnectionInfo *pConn); //归还参数pConn所代表的连接到到连接池中
 	void _inRecycleConnQueue(NgxConnectionInfo *pConn);	//将要回收的连接放到一个队列中来
-	void _NgxCloseConn(NgxConnectionInfo *pConn);	  //通用连接关闭函数，资源用这个函数释放
+	void _NgxFreeConnAndCloseConnFd(NgxConnectionInfo *pConn);	  //通用连接关闭函数，资源用这个函数释放
 	
 private:
 	void ReadConf();					//专门用于读各种配置项
@@ -165,7 +163,7 @@ private:
 	time_t _GetEarliestTime();								  //从multimap中取得最早的时间返回去
 	NgxExtraMsgHeaderInfo *_RemoveFirstTimer();				  //从m_timeQueuemap移除最早的时间，并把最早这个时间所在的项的值所对应的指针 返回，调用者负责互斥，所以本函数不用互斥，
 	NgxExtraMsgHeaderInfo *_GetOverTimeTimerr(time_t cur_time); //根据给的当前时间，从m_timeQueuemap找到比这个时间更老（更早）的节点【1个】返回去，这些节点都是时间超过了，要处理的节点
-	void _DeleteFromTimerQueue(NgxConnectionInfo *pConn);	  //把指定用户tcp连接从timer表中抠出去
+	void _DeleteConnFromTimerQueue(NgxConnectionInfo *pConn);	  //把指定用户tcp连接从timer表中抠出去
 	void _ClearAllFromTimerQueue();							  //清理时间队列中所有内容
 private:
 	//线程相关函数
@@ -179,8 +177,8 @@ protected:
 	size_t m_pkgMsgHeaderSize; // sizeof(NgxExtraMsgHeaderInfo);
 
 	//时间相关
-	int m_ifTimeOutKick; //当时间到达Sock_MaxWaitTime指定的时间时，直接把客户端踢出去，只有当Sock_WaitTimeEnable = 1时，本项才有用
-	int m_iWaitTime;	 //多少秒检测一次是否 心跳超时，只有当Sock_WaitTimeEnable = 1时，本项才有用
+	int m_ifTimeOutKick;//当时间到达Sock_MaxWaitTime指定的时间时,直接把客户端踢出去,只有当Sock_WaitTimeEnable = 1时，本项才有用
+	int m_iWaitTime;//多少秒检测一次是否 心跳超时，只有当Sock_WaitTimeEnable = 1时，本项才有用
 
 private:
 
@@ -223,7 +221,7 @@ private:
 	sem_t m_semEventSendQueue; //处理发消息线程相关的信号量
 
 	//时间相关
-	int m_ifkickTimeCount;//是否开启踢人时钟，1：开启   0：不开启
+	int m_bKickConnWhenTimeOut;//是否开启踢人时钟，1：开启   0：不开启
 	pthread_mutex_t m_timeQueueMutex;	//和时间队列有关的互斥量
 	std::multimap<time_t, NgxExtraMsgHeaderInfo *> m_timerQueueMap; //时间队列
 	size_t m_timerQueueMapSize;//时间队列的尺寸
@@ -234,7 +232,7 @@ private:
 	//网络安全相关
 	int m_floodAkEnable;			  // Flood攻击检测是否开启,1：开启   0：不开启
 	unsigned int m_floodTimeInterval; //表示每次收到数据包的时间间隔是100(毫秒)
-	int m_floodKickCount;			  //累积多少次踢出此人
+	int m_floodAtkMaxCnt;			  //累积多少次踢出此人
 
 	//统计用途
 	time_t m_lastPrintTime;		//上次打印统计信息的时间(10秒钟打印一次)
